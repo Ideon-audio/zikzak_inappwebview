@@ -8,6 +8,8 @@ import 'package:path/path.dart' as p;
 import 'package:webview_windows/webview_windows.dart';
 import 'package:zikzak_inappwebview_platform_interface/zikzak_inappwebview_platform_interface.dart';
 
+import 'live_webviews.dart';
+
 /// Names reserved by the platform and not allowed for user-registered
 /// JavaScript handlers. Mirrors the lists used by the Android, iOS, macOS
 /// and Linux implementations so behaviour stays consistent across platforms.
@@ -56,11 +58,23 @@ class InAppWebViewWindowsController extends PlatformInAppWebViewController {
   StreamSubscription<LoadingState>? _loadingStateSubscription;
   StreamSubscription<HistoryChanged>? _historyChangedSubscription;
 
+  /// Called with every URL the `urlChanged` event reports, after
+  /// [currentUrl] has been updated. The widget installs it to dispatch
+  /// `onUpdateVisitedHistory`; `url` is a single-subscription stream, so
+  /// the forwarding has to go through this controller's own listener.
+  void Function(String url)? onUrlChanged;
+
   InAppWebViewWindowsController(
     PlatformInAppWebViewControllerCreationParams params,
     this._controller,
   ) : super.implementation(params) {
-    _urlSubscription = _controller.url.listen((url) => _currentUrl = url);
+    // The cookie manager has no WebView of its own: it clears cookies
+    // through whichever controller is alive (see LiveWebviews).
+    LiveWebviews.register(_controller);
+    _urlSubscription = _controller.url.listen((url) {
+      _currentUrl = url;
+      onUrlChanged?.call(url);
+    });
     _loadingStateSubscription = _controller.loadingState.listen((state) {
       // webview_windows reports no granular percentage, so mirror the same
       // 0 -> 100 mapping dispatchLoadingStateChange already reports to
@@ -386,6 +400,8 @@ class InAppWebViewWindowsController extends PlatformInAppWebViewController {
 
   @override
   void dispose({bool isKeepAlive = false}) {
+    LiveWebviews.unregister(_controller);
+    onUrlChanged = null;
     _webMessageSubscription?.cancel();
     _webMessageSubscription = null;
     _urlSubscription?.cancel();

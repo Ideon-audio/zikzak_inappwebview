@@ -25,7 +25,9 @@ bool isEnvironmentAlreadyInitializedError(Object error) {
 /// NOT applied — a `debugPrint` in debug builds surfaces that divergence.
 /// Any other [PlatformException] is rethrown: only
 /// `environment_already_initialized` is safe to ignore.
-@visibleForTesting
+///
+/// Public (not test-only): [WindowsCookieManager] brings the environment up
+/// itself when it has to clear cookies with no WebView open.
 Future<void> ensureWebView2Environment(WebViewEnvironmentInitArgs args) async {
   try {
     await WebviewController.initializeEnvironment(
@@ -44,6 +46,33 @@ Future<void> ensureWebView2Environment(WebViewEnvironmentInitArgs args) async {
         '${args.additionalArguments}).',
       );
     }
+  }
+}
+
+/// The WebView2 user-data folder used when the host supplies none:
+/// `<application support>/zikzak_webview2_data`, created on first use and
+/// verified writable. Shared by the widget and by [WindowsCookieManager],
+/// which may have to bring up the environment itself when no WebView is
+/// open.
+Future<String> defaultWebView2UserDataFolder() async {
+  final directory = await getApplicationSupportDirectory();
+  final path = '${directory.path}/zikzak_webview2_data';
+  final dir = Directory(path);
+  if (!await dir.exists()) {
+    await dir.create(recursive: true);
+  }
+  // Verify writability
+  final testFile = File('$path/.write_test');
+  try {
+    await testFile.writeAsString('test');
+    try {
+      await testFile.delete();
+    } catch (_) {
+      // Ignore deletion errors (e.g., temporary file locks from AV)
+    }
+    return path;
+  } catch (e) {
+    throw StateError('WebView2 user data folder is not writable: $path');
   }
 }
 
@@ -162,28 +191,6 @@ class _InAppWebViewWindowsWidgetStateImpl
     initPlatformState();
   }
 
-  Future<String> _getDefaultUserDataFolder() async {
-    final directory = await getApplicationSupportDirectory();
-    final path = '${directory.path}/zikzak_webview2_data';
-    final dir = Directory(path);
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
-    // Verify writability
-    final testFile = File('$path/.write_test');
-    try {
-      await testFile.writeAsString('test');
-      try {
-        await testFile.delete();
-      } catch (_) {
-        // Ignore deletion errors (e.g., temporary file locks from AV)
-      }
-      return path;
-    } catch (e) {
-      throw StateError('WebView2 user data folder is not writable: $path');
-    }
-  }
-
   Future<void> initPlatformState() async {
     try {
       // Resolve the WebView2 environment arguments from the user-supplied
@@ -192,7 +199,7 @@ class _InAppWebViewWindowsWidgetStateImpl
       // `additionalBrowserArguments` — so Chromium flags such as
       // `--disable-web-security` never reached WebView2 (issue #178).
       final settings = widget.params.webViewEnvironment?.settings;
-      final defaultUserDataFolder = await _getDefaultUserDataFolder();
+      final defaultUserDataFolder = await defaultWebView2UserDataFolder();
       final args = resolveEnvironmentInitArgs(
         settings: settings,
         defaultUserDataFolder: () => defaultUserDataFolder,
@@ -232,6 +239,24 @@ class _InAppWebViewWindowsWidgetStateImpl
       if (widget.params.onWebViewCreated != null) {
         widget.params.onWebViewCreated!(callbackController);
       }
+
+      // Every top-level navigation, redirects included, reports its URL
+      // through `urlChanged` — the one event that carries the URL itself
+      // (`loadingState` does not, see the NOTE below). It is dispatched as
+      // onUpdateVisitedHistory, the callback the platform interface documents
+      // for Windows, so a host watching for a redirect (an OAuth flow that
+      // lands on a URL carrying the code) sees it even when the loadingState
+      // event arrived before the matching urlChanged and onLoadStart was
+      // given a stale URL. The controller owns the single-subscription `url`
+      // stream, so it forwards from its own listener.
+      controller.onUrlChanged = (url) {
+        if (!mounted) return;
+        widget.params.onUpdateVisitedHistory?.call(
+          callbackController,
+          WebUri(url),
+          null,
+        );
+      };
 
       // Apply virtual host mappings from the environment settings. Each
       // mapping serves a local folder at https://<hostName>/ and bypasses

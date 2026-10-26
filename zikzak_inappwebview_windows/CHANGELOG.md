@@ -1,3 +1,15 @@
+## Unreleased
+
+
+### Features
+
+- [Windows] `CookieManager` is implemented: `createPlatformCookieManager` returns a `WindowsCookieManager` instead of the platform interface's `UnimplementedError`. `webview_windows` exposes one cookie operation, `WebviewController.clearCookies()`, as an instance method of an initialized controller, while the cookie manager is a process-wide singleton with no WebView in hand; cookies belong to the WebView2 environment (its user-data folder), so clearing them through any live controller clears them for all. `deleteAllCookies()` therefore goes through a live controller from the new `LiveWebviews` registry (every `InAppWebViewWindowsController` registers on construction and leaves on dispose), and when no WebView is open brings up a short-lived headless controller for the call — the cookies of a closed WebView, or of the previous run, are still on disk. Reading or setting individual cookies is not possible through `webview_windows`; those methods keep the interface's `UnimplementedError` so a caller is told rather than silently served nothing. A sign-in screen's "use a different account" (`CookieManager.instance().deleteAllCookies()`) now works on Windows
+- [Windows] `onUpdateVisitedHistory` is dispatched from the `urlChanged` event — the callback the platform interface already documents for Windows. `urlChanged` is the one event that carries the URL of every top-level navigation, redirects included; `loadingState` does not, and the two streams are independent, so `onLoadStart` can be handed a stale URL when the loading event lands first. A host watching for a redirect (an OAuth flow that lands on a URL carrying the authorization code) could miss it; through `onUpdateVisitedHistory` it sees every URL. The controller owns the single-subscription `url` stream and forwards from its own listener (`onUrlChanged`), so `getUrl()` and the dispatched URL come from the same cache. `isReload` is `null` (not reported by `webview_windows`)
+- The default WebView2 user-data folder helper is a top-level `defaultWebView2UserDataFolder()` (was private to the widget), shared with the cookie manager
+
+### Internal
+
+- `in_app_webview_windows_widget_wiring_test`: `urlChanged` → `onUpdateVisitedHistory` (order, parity with `getUrl()`, nothing after unmount) and `deleteAllCookies` → `clearCookies` on the live controller, with the registry emptied on unmount
 ## 6.3.0 - 2026-10-26
 
 

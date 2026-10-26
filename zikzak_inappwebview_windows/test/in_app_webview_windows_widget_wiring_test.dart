@@ -5,7 +5,9 @@ import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:webview_windows/webview_windows.dart' show LoadingState, Webview;
 import 'package:zikzak_inappwebview_platform_interface/zikzak_inappwebview_platform_interface.dart';
+import 'package:zikzak_inappwebview_windows/src/cookie_manager.dart';
 import 'package:zikzak_inappwebview_windows/src/in_app_webview_windows_platform.dart';
+import 'package:zikzak_inappwebview_windows/src/live_webviews.dart';
 
 /// Drives the real `InAppWebViewWindowsWidget` over mocked `webview_windows`
 /// channels.
@@ -77,6 +79,11 @@ void main() {
             calls.add({'name': 'onLoadStop', 'url': url?.toString()}),
         onProgressChanged: (controller, progress) =>
             calls.add({'name': 'onProgressChanged', 'progress': progress}),
+        onUpdateVisitedHistory: (controller, url, isReload) => calls.add({
+          'name': 'onUpdateVisitedHistory',
+          'url': url?.toString(),
+          'isReload': isReload,
+        }),
       ),
     );
 
@@ -101,7 +108,10 @@ void main() {
       return null;
     });
     messenger.setMockMethodCallHandler(eventChannel, (call) async => null);
-    messenger.setMockMethodCallHandler(textureChannel, (call) async => null);
+    messenger.setMockMethodCallHandler(textureChannel, (call) async {
+      calls.add({'name': 'texture:${call.method}'});
+      return null;
+    });
     messenger.setMockMethodCallHandler(
       pathProviderChannel,
       (call) async => tempDir.path,
@@ -146,6 +156,78 @@ void main() {
     );
 
     await unmountWebView(tester);
+  });
+
+  testWidgets('urlChanged is dispatched as onUpdateVisitedHistory', (
+    tester,
+  ) async {
+    await pumpWebView(tester);
+
+    // A redirect chain: the loadingState event may land before the matching
+    // urlChanged, so onLoadStart can carry a stale URL — the URL itself is
+    // only reliable through urlChanged, hence onUpdateVisitedHistory.
+    await emit(tester, {
+      'type': 'urlChanged',
+      'value': 'https://example.com/login',
+    });
+    await emit(tester, {
+      'type': 'urlChanged',
+      'value': 'https://example.com/callback?code=abc',
+    });
+
+    final visits = calls
+        .where((c) => c['name'] == 'onUpdateVisitedHistory')
+        .map((c) => c['url'])
+        .toList();
+    expect(visits, [
+      'https://example.com/login',
+      'https://example.com/callback?code=abc',
+    ]);
+    expect(
+      (await platformController.getUrl())?.toString(),
+      'https://example.com/callback?code=abc',
+      reason: 'the same listener feeds currentUrl; they cannot drift apart',
+    );
+
+    await unmountWebView(tester);
+
+    await emit(tester, {
+      'type': 'urlChanged',
+      'value': 'https://example.com/after-unmount',
+    });
+    expect(
+      calls.where((c) => c['url'] == 'https://example.com/after-unmount'),
+      isEmpty,
+      reason: 'an unmounted widget must not deliver events',
+    );
+  });
+
+  testWidgets('CookieManager.deleteAllCookies clears through a live WebView', (
+    tester,
+  ) async {
+    await pumpWebView(tester);
+    expect(LiveWebviews.count, 1);
+
+    final ok = await tester.runAsync(
+      () => WindowsCookieManager(
+        const PlatformCookieManagerCreationParams(),
+      ).deleteAllCookies(),
+    );
+    expect(ok, isTrue);
+    expect(
+      calls.where((c) => c['name'] == 'texture:clearCookies'),
+      hasLength(1),
+      reason:
+          'cookies belong to the process-wide WebView2 environment, so '
+          'clearing them through any live controller clears them for all',
+    );
+
+    await unmountWebView(tester);
+    expect(
+      LiveWebviews.count,
+      0,
+      reason: 'a disposed controller must leave the registry',
+    );
   });
 
   testWidgets('unmounting the widget disposes the platform controller', (
